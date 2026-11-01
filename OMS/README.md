@@ -59,17 +59,22 @@ OMS(Order Management System)는 **주문의 정본(source of truth)**이다. 여
 - **P5 창고 할당**: 재고의 정본은 WMS다. OMS는 할당 판단에 쓸 가용 재고를 어디서 보는가가 쟁점이다 (6.2의 15번).
 - **P8 취소**: 취소는 상태에 따라 비용이 다르다. 할당 전 = 상태만 변경, 피킹 전 = 출고 요청 취소, 운송장 발급 후 = 운송장 취소, 출고 후 = 취소 불가(반품).
 
-## 4. 주문 상태 (초안)
+## 4. 주문 상태 (쟁점 16 결정)
 
 ```text
-수신 -> 정규화됨 -> 검증됨 -> 할당됨 -> 출고 요청됨 -> 출고 완료 -> 배송 중 -> 배송 완료
-          |           |         |
-          +-> 보류 <---+         +-> 백오더
-어느 단계든 -> 취소 요청 -> 취소됨 / 취소 불가
+주문 (OMS가 바꿈)
+RECEIVED -> VALIDATED -> ALLOCATED -> FULFILLING -> COMPLETED
+                         (일부 백오더면 PARTIALLY_ALLOCATED)
+어느 단계든 -> CANCELLED
+보류 = 상태 값 아님. order_hold에 미해제 행이 있으면 보류, 상태 컬럼은 보류 진입 단계 유지
+
+출고 요청 (WMS, TMS 이벤트로만 바뀜)
+CREATED -> SENT -> ACCEPTED -> WAVE_RELEASED -> PACKED -> SHIPPED -> DELIVERED
+(REJECTED, CANCELLED)
 ```
 
-- 할당됨 이후의 상태는 OMS가 스스로 바꾸지 않는다. WMS, TMS 이벤트를 받아 바뀐다.
-- 주문 하나가 출고 요청 여러 개로 나뉘면 "일부 출고"가 생긴다. 주문 상태를 출고 요청 상태들의 집계로 볼지 정해야 한다.
+- 주문 진행 요약(`PARTIALLY_SHIPPED` 등)은 출고 요청 품목 수량을 집계해 `orders.fulfillment_summary`에 캐시한다.
+- 모든 품목이 끝 상태(DELIVERED 또는 CANCELLED)가 되면 주문은 COMPLETED.
 
 ## 5. 다른 시스템과 주고받는 것
 
@@ -116,6 +121,6 @@ OMS(Order Management System)는 **주문의 정본(source of truth)**이다. 여
 | 13 | 주문과 출고 요청의 관계 (합치기/나누기) | 주문 : 출고 요청 = 1:N인가 N:M인가, 품목 단위 매핑 테이블 | 1:N(분할만) / N:M(합포장 포함, 출고 요청 품목이 주문 품목을 참조) | N:M을 품목 단위 매핑으로 표현. 출고 요청은 별도 애그리거트 `fulfillment_order`(UUID v7, `seller_id`, 창고, 서비스 레벨, `shipment_type`, 출고 기한, 상태, `id` 월 범위 파티션) + `fulfillment_order_line`(PK `(fulfillment_order_id, line_no)`, `order_id`, `order_line_no`, 수량). 주문은 ID로만 참조. 한 구조로 분할, 합포장, 수량 분할(한 품목을 두 창고로)을 모두 표현. **합포장 조건(전부 충족)**: 같은 셀러, 같은 수취인(정규화한 이름, 연락처, 주소의 HMAC 비교), 같은 창고, 서비스 레벨, `shipment_type`, 해외면 합산 신고가가 목적지 면세 한도 이하, 셀러 룰(10)로 합포장 켜짐. **합포장 시간 창 = 출차(마감) 시각까지**: 마감 전에 들어온 주문은 같은 묶음에 합치고, 마감 후에는 1초라도 늦으면 다음 출고분으로 분리. 마감이 지나면 출고 기한이 다음 영업일로 바뀌므로(9) 출고 기한을 합포장 키에 넣어 경계를 표현. 합친 출고 요청의 부분 취소는 17에서. 마감 판정 기준 = 결제 시각 `paid_at`(고객 주문이 시작된 시각, 11 사은품 순서와 같은 기준). 채널이 주지 않으면 OMS 접수 시각. 그 뒤 OMS, WMS 처리가 늦어진 것은 고객 주문을 밀어낼 이유가 아니라 따로 다룰 문제마감 시각 정각은 포함(`paid_at <= 접수 마감`이면 당일). **처리 지연 건**: 원인이 우리 쪽(채널 수집 지연, 큐 적체, 장애)이면 출고 기한을 당일로 유지하고 WMS에 늦은 웨이브(매니페스트 마감 전 마지막 추가 웨이브)를 요청, 못 맞추면 다음 출차 + SLA 위반. 원인이 보류(12)면 보류 해제 시각 기준으로 출고 기한을 재계산하고 보류 기간은 SLA에서 제외. 출고 요청에 `sla_breach_reason`(`SYSTEM_DELAY`, `HOLD`, `STOCK_SHORTAGE`). 우선순위 큐는 두지 않는다(들어온 순서가 결제 순서와 거의 같고, 할당 전에는 출고 기한이 없음). 대신 경보 두 개: 큐 적체(처리 안 된 가장 오래된 메시지 나이), 웨이브 직전 미전송(출고 기한이 오늘인데 웨이브 릴리스 N분 전까지 WMS로 안 넘어간 출고 요청). 주문 추가 한계: 주문은 결제 확인, 검증, 룰, 사은품, 보류 해제 등 OMS 판단을 **모두 마친 시점**에야 합포장 후보가 된다. 그 시점에 같은 합포장 키의 출고 요청이 아직 WMS 웨이브에 실리기 전이면 추가 요청, 이미 실렸으면 WMS가 거절하고 OMS는 같은 출고 기한으로 새 출고 요청을 만든다. 추가 가능 여부의 정본은 WMS(웨이브 릴리스). 시각 4개 역산 구조는 9 |
 | 14 | 다중 창고 할당 기준 | 창고 테이블(위치, 권역, 우선순위), 할당 결과와 사유 기록 | 가까운 창고(8의 권역) / 한 창고에서 다 채우기 / 마감 시간 맞출 수 있는 창고(9) / 비용 점수. 실패 시 분할 -> 백오더 | 순서: ① 권역 x 서비스 레벨 처리 가능 창고만(해외면 수출 창고만, 8, 9) ② 오늘 마감을 맞출 수 있는 창고만(없으면 다음 영업일 기준으로 다시) ③ 한 창고에서 주문 전체를 채울 수 있는 곳 우선 ④ 동점이면 같은 수취인의 열린 출고 요청이 있는 창고(13), 그다음 `warehouse_region_priority` ⑤ 실패 시 창고 수가 가장 적은 분할, 그래도 모자란 품목은 백오더. 셀러가 분할을 끌 수 있다(셀러 룰 10, 끄면 분할 대신 다 모일 때까지 대기). 결과와 사유는 `allocation_decision`(주문, 후보 창고, 탈락 사유, 선택 창고, 시각)에 기록. 비용 점수(운임, 창고 부하)는 v2 후보 |
 | 15 | 가용 재고 소유와 동시성 | OMS에 재고 사본 테이블이 생기는가, 핫 SKU 처리 위치 | WMS에 매번 조회 / OMS 사본 / WMS에 예약 요청. 차감 방식: 조건부 UPDATE / 비관적 락 / Redis 선차감 / 버킷 분할 | OMS 사본 + OMS 예약. `inventory_balance`(PK `(warehouse_id, sku_id)`, `on_hand`, `reserved`, `last_wms_seq`, `version`), 가용 = `on_hand - reserved`. `inventory_reservation`(`(fulfillment_order_id, line_no)`, 창고, SKU, 수량, 상태 RESERVED / RELEASED / CONSUMED). 정본: 실물 수량 `on_hand` = WMS, 누구 몫인지 `reserved` = OMS. WMS 출고 완료 이벤트는 한 트랜잭션에서 `on_hand` 차감 + 예약 CONSUMED + `reserved` 차감. 취소는 RELEASED + `reserved` 복원. 차감은 조건부 UPDATE(`... SET reserved = reserved + :qty WHERE ... AND on_hand - reserved >= :qty`, 영향 행 0 = 재고 부족). 핫 SKU는 v1 그대로, 5단계 실험에서 측정 후 버킷 분할(v2) 검토. Redis 선차감은 정본이 둘이 되어 제외. WMS 이벤트는 창고 x SKU별 순번, `last_wms_seq`보다 큰 것만 반영. WMS 주기 전체 스냅샷으로 차이 기록 후 보정 |
-| 16 | 주문 상태 모델 | 주문 상태 컬럼과 출고 요청 상태의 관계, 상태 이력 테이블 | 주문 상태 별도 저장 / 출고 요청 상태들의 집계로 계산 | 미정 |
+| 16 | 주문 상태 모델 | 주문 상태 컬럼과 출고 요청 상태의 관계, 상태 이력 테이블 | 주문 상태 별도 저장 / 출고 요청 상태들의 집계로 계산 | 두 층으로 나눈다. 주문 상태 = OMS가 바꾸는 단계만(RECEIVED, VALIDATED, ALLOCATED / PARTIALLY_ALLOCATED, FULFILLING, COMPLETED, CANCELLED). 보류는 상태 값이 아니라 `order_hold`의 미해제 행으로 계산하고, 상태 컬럼은 보류 진입 단계를 유지해 재진행 지점이 된다(12). 출고 이후 진행의 정본 = 출고 요청 상태(CREATED, SENT, ACCEPTED, WAVE_RELEASED, PACKED, SHIPPED, DELIVERED, REJECTED, CANCELLED), WMS, TMS 이벤트로만 바뀐다. `WAVE_RELEASED` = 주문 추가 불가 경계(13). 주문 진행 요약은 출고 요청 개수가 아니라 품목 수량으로 집계해 `orders.fulfillment_summary`에 캐시(이벤트 수신 시 갱신, 루트 `version`). 모든 품목이 끝 상태면 COMPLETED. 이력 `order_status_history`, `fulfillment_order_status_history`(이전, 다음, 시각, 원인 이벤트 ID, 주체), 허용 전이는 도메인 코드의 전이표, 허용 안 된 전이는 거부 후 기록 |
 | 17 | 취소, 변경 단위 | 취소 요청 테이블, 품목 단위 수량 | 주문 전체만 / 품목, 수량 단위 부분 취소. 주소 변경 허용 시점 | 미정 |
 | 18 | 흐름 진행 주체와 메시지 전달 | saga 상태 테이블, outbox, inbox, 타이머 컬럼 | OMS 안의 프로세스 매니저 / 별도 오케스트레이터 서버 / 코레오그래피 / 혼합 | (선결정) 보내는 요청의 멱등 키 = 업무 ID `(fulfillment_order_id, 동작)`. `request_id`는 추적, 응답 매칭용. 나머지 미정 |
