@@ -18,6 +18,7 @@
 | inventory | `inventory_balance`, `inventory_reservation` | 없음 / `fulfillment_order_id` 월 범위 |
 | fulfillment (출고 요청 애그리거트) | `fulfillment_order`, `fulfillment_order_line`, `fulfillment_order_status_history` | `fulfillment_order_id` 월 범위(13) |
 | process | `order_process`, `order_process_step` | `order_id` 월 범위(18) |
+| pms 복제 (PMS P7) | `pms_channel_mapping`, `pms_sku_current` | 없음 |
 | reference (OMS가 보유하는 기준 정보) | `channel`, `country`, `region_mapping`, `warehouse`, `warehouse_region_priority`, `warehouse_capability`, `business_calendar`, `service_level`, `channel_service_level_mapping` | 없음 |
 | messaging (shared) | `outbox_event`, `command_outbox`, `inbox_message` | `id` 월 범위(오래된 파티션 통째로 삭제) |
 
@@ -110,10 +111,12 @@ erDiagram
         uuid id PK
         uuid order_id
         varchar reason_code
+        varchar wait_key "자동 해제 대기 대상 (PMS P7)"
         varchar created_by
         timestamptz created_at
         varchar released_by
         timestamptz released_at "null = 미해제"
+        uuid release_cause_message_id "자동 해제 원인 이벤트"
     }
     order_process {
         uuid order_id PK
@@ -225,6 +228,12 @@ erDiagram
 | `service_level` | `code`(PK), `shipment_type` | 9 |
 | `channel_service_level_mapping` | `channel_id`, `channel_value`(PK 둘), `service_level` | 9. 매핑 실패 = 보류 |
 
+### pms 복제 (PMS P7)
+| 테이블 | 컬럼 | 쟁점 |
+|---|---|---|
+| `pms_channel_mapping` | `channel_id`, `seller_id`, `channel_product_id`, `channel_option_id`(PK 넷), `target_type`(SKU / SET), `target_id`, `target_version`, `pms_seq` | PMS P7. 순번이 큰 이벤트만 반영, 주기 스냅샷 보정 |
+| `pms_sku_current` | `sku_id`(PK), `current_version`, `pms_seq` | PMS P7. 수집 시점 현재 버전 참조(PMS P2) |
+
 ### messaging (shared)
 | 테이블 | 컬럼 | 쟁점 |
 |---|---|---|
@@ -240,6 +249,7 @@ erDiagram
 | `orders` | `(order_no)` | 사람이 주문번호로 찾기 |
 | `order_recipient` | `(name_hmac)`, `(phone_hmac)` | 수취인 검색(5) |
 | `order_hold` | `(order_id) WHERE released_at IS NULL` | 보류 여부 계산(12) |
+| `order_hold` | `(wait_key) WHERE released_at IS NULL` | 매핑 이벤트 도착 시 기다리던 보류 찾기(PMS P7) |
 | `fulfillment_order` | `(seller_id, warehouse_id, recipient_key_hmac, service_level, shipment_type, ship_by) WHERE status IN ('CREATED','SENT','ACCEPTED')` | 합포장 대상 찾기(13) |
 | `fulfillment_order` | `(ship_by, status)` | 웨이브 직전 미전송 경보(13) |
 | `fulfillment_order_line` | `(order_id)` | 주문에서 출고 요청 찾기(16 집계, 17 취소) |
@@ -260,4 +270,5 @@ erDiagram
 | `fulfillment_order.recipient_key_hmac` | 합포장 키를 출고 요청에 두어 인덱스 하나로 대상 검색 |
 | `warehouse_capability`의 시각 4개 | 9, 13의 출차 역산 구조를 컬럼으로 |
 | `country.duty_free_limit` | 13의 해외 합포장 면세 한도 조건 |
+| `order_hold.wait_key`, `release_cause_message_id` | PMS P7 자동 해제. 매핑 실패 보류에 기다리는 매핑 키를 적고, 매핑 이벤트가 오면 해제 + 원인 이벤트 기록 |
 | `channel.sends_updated_at`, `sends_paid_at` | 4(b) 순서 반영 방식, 13 마감 판정 대체 기준 선택 |
