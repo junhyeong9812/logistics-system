@@ -26,6 +26,16 @@
 - PostgreSQL은 파티션 테이블의 PK, UNIQUE에 파티션 키가 들어가야 한다. 그래서 전역 유일이 필요한 것(채널 주문 멱등)은 파티션하지 않은 `order_idempotency_key`로 뺐다(1).
 - 사람이 읽는 주문번호 `order_no`는 시퀀스로 발급한다. 파티션 테이블이라 UNIQUE 제약은 `(order_no, id)`만 가능하므로 유일성은 시퀀스가 보장한다.
 
+## 1.1 단계별 테이블 (`docs/scope.md` 4절)
+
+| 단계 | 테이블 |
+|---|---|
+| S1 | `orders`, `order_line`, `order_recipient`, `raw_order`, `order_status_history`, `fulfillment_order`, `fulfillment_order_line`, `fulfillment_order_status_history`, `inventory_balance`, `inventory_reservation`, `allocation_decision`, `pms_channel_mapping`, `pms_sku_current`, `channel`, `country`, `region_mapping`, `warehouse`, `warehouse_region_priority`, `warehouse_capability`(마감 1개만 사용), `service_level` |
+| S2 | `order_idempotency_key`, `outbox_event`, `command_outbox`, `inbox_message`, `order_process`, `order_process_step` |
+| S3 | `order_hold`, `order_cancel_request`, `order_cancel_request_line`, `channel_service_level_mapping` |
+| S4 | `seller_rule`, `order_rule_application`, `promotion`, `promotion_gift_grant`, `export_stock_wait`, `business_calendar`, `warehouse_capability`의 마감 4시각 |
+| S5 | 월 범위 파티션 적용(테이블은 S1부터 같은 PK로 만들고 파티션만 나중에) |
+
 ## 2. 핵심 관계 (주문 - 출고 요청 - 재고)
 
 ```mermaid
