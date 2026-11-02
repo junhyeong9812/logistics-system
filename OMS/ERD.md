@@ -241,7 +241,7 @@ erDiagram
 ### pms 복제 (PMS P7)
 | 테이블 | 컬럼 | 쟁점 |
 |---|---|---|
-| `pms_channel_mapping` | `channel_id`, `seller_id`, `channel_product_id`, `channel_option_id`(PK 넷), `target_type`(SKU / SET), `target_id`, `target_version`, `pms_seq` | PMS P7. 순번이 큰 이벤트만 반영, 주기 스냅샷 보정 |
+| `pms_channel_mapping` | `channel_id`, `seller_id`, `channel_product_id`, `channel_option_id`(PK 넷), `target_type`(SKU / SET), `target_id`, `pms_seq`(버전은 수집 시점에 `pms_sku_current`로, PMS P3) | PMS P7. 순번이 큰 이벤트만 반영, 주기 스냅샷 보정 |
 | `pms_sku_current` | `sku_id`(PK), `current_version`, `pms_seq` | PMS P7. 수집 시점 현재 버전 참조(PMS P2) |
 
 ### messaging (shared)
